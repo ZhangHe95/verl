@@ -2,7 +2,8 @@
 set -xeuo pipefail
 
 project_name='DAPO'
-exp_name='DAPO-Qwen2.5-32B'
+date_str=$(date +%Y%m%d%H%M%S)
+exp_name="DAPO-Qwen3-30B-A3B-${date_str}"
 
 adv_estimator=grpo
 
@@ -31,16 +32,16 @@ n_resp_per_prompt=16
 train_prompt_mini_bsz=32
 
 # Ray
-RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
+PWD=.
+RAY_ADDRESS=${RAY_ADDRESS:-"http://[2605:340:cdb1:11c:34da:cbd5:e014:1daf]:11074"}
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
 NNODES=${NNODES:-16}
 # Paths
-RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
-MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen2.5-32B"}
-CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/dapo-math-17k.parquet"}
-TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/aime-2024.parquet"}
+MODEL_PATH=${MODEL_PATH:-"/mnt/bn/bandai-lf/shared/models/Qwen3-30B-A3B"}
+CKPTS_DIR=${CKPTS_DIR:-"/mnt/hdfs/byte_ad_bandai/user/zhanghe.ads/models/${project_name}/${exp_name}"}
+TRAIN_FILE=${TRAIN_FILE:-"/mnt/hdfs/byte_ad_bandai/user/zhanghe.ads/dataset/dapo-math-17k.parquet"}
+TEST_FILE=${TEST_FILE:-"/mnt/hdfs/byte_ad_bandai/user/zhanghe.ads/dataset/aime-2024.parquet"}
 
 # Algorithm
 temperature=1.0
@@ -53,11 +54,12 @@ sp_size=8
 use_dynamic_bsz=True
 actor_ppo_max_token_len=$((max_prompt_length + max_response_length))
 infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
-offload=True
+offload=False
 gen_tp=4
 
 ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     --working-dir "${WORKING_DIR}" \
+    --address="${RAY_ADDRESS}" \
     -- python3 -m recipe.dapo.main_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
@@ -124,7 +126,7 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
-    trainer.save_freq=5 \
+    trainer.save_freq=20 \
     trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto
