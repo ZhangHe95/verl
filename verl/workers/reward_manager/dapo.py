@@ -15,6 +15,7 @@
 from collections import defaultdict
 
 import torch
+import re
 
 from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
@@ -38,6 +39,13 @@ class DAPORewardManager:
         self.reward_fn_key = reward_fn_key
         self.overlong_buffer_cfg = overlong_buffer_cfg
         self.max_resp_len = max_resp_len
+        
+        # Initialize rank attribute
+        import torch.distributed
+        if torch.distributed.is_initialized():
+            self.rank = torch.distributed.get_rank()
+        else:
+            self.rank = 0
 
         if self.overlong_buffer_cfg is not None:
             assert self.max_resp_len is not None, f"max_resp_len must be provided if {overlong_buffer_cfg=}, but got None"
@@ -59,6 +67,8 @@ class DAPORewardManager:
 
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
+            if self.rank == 0 and i == 0:
+                print(f'data_item keys: {data_item.batch.keys()}')
 
             prompt_ids = data_item.batch["prompts"]
 
@@ -84,12 +94,34 @@ class DAPORewardManager:
 
             extra_info = data_item.non_tensor_batch.get("extra_info", None)
 
-            result = self.compute_score(
-                data_source=data_source,
-                solution_str=response_str,
-                ground_truth=ground_truth,
-                extra_info=extra_info,
-            )
+
+            responses_grm = data_item.batch.get("responses_grm", [])
+            if responses_grm is not None and len(responses_grm) > 0:
+
+                if not isinstance(responses_grm[0], str):
+                    responses_grm = self.tokenizer.decode(responses_grm, skip_special_tokens=True)
+
+                # Judgment: Correct / Incorrect
+                parsed_res = re.findall(r"Judgment: (\S+)", responses_grm)
+                if parsed_res:
+                    correct = 1.0 if parsed_res[-1] == "Correct" else -1.0
+                else:
+                    correct = -1.0
+
+                result = {
+                    "score": correct,
+                    "acc": 1.0 if correct > 0 else 0.0,  # acc should be 1.0 for correct, 0.0 for incorrect
+                    "pred": responses_grm,
+                }
+            else:
+                if self.rank == 0:
+                    print(f"No valid responses_grm found, falling back to compute_score")
+                result = self.compute_score(
+                    data_source=data_source,
+                    solution_str=response_str,
+                    ground_truth=ground_truth,
+                    extra_info=extra_info,
+                )
 
             score: float
             if isinstance(result, dict):

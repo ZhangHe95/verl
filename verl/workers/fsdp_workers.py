@@ -616,6 +616,150 @@ class ActorRolloutRefWorker(Worker):
 
             output = self.rollout_sharding_manager.postprocess_data(output)
 
+
+        output = output.to("cpu")
+
+        # clear kv cache
+        torch.cuda.empty_cache()
+        return output
+    
+    def _switch_to_grm_template(self, data: DataProto):
+        # prompts: [batch_size, 2048] with left padding
+        # responses: [batch_size, 20480] with right padding  
+        # target: remove right padding from responses, then concatenate to form proper prompt with only left padding
+        
+        prompts = data.batch["prompts"]  # [bs, 2048]
+        responses = data.batch["responses"]  # [bs, 20480]
+        full_attention_mask = data.batch["attention_mask"]  # [bs, 2048+20480]
+        
+        batch_size = prompts.shape[0]
+        prompt_len = prompts.shape[1]
+        response_len = responses.shape[1]
+        
+        # Extract attention masks for prompts and responses
+        prompt_attention_mask = full_attention_mask[:, :prompt_len]  # [bs, 2048]
+        response_attention_mask = full_attention_mask[:, prompt_len:]  # [bs, 20480]
+        
+        rm_input_ids_list = []
+        rm_attention_mask_list = []
+        
+        for i in range(batch_size):
+            # Get valid response length by finding the last non-zero attention mask position
+            # Traverse from right to left to handle internal zeros in attention mask
+            response_mask = response_attention_mask[i]
+            valid_response_length = 0
+            for j in range(response_len - 1, -1, -1):
+                if response_mask[j] != 0:
+                    valid_response_length = j + 1
+                    break
+            
+            valid_responses = responses[i][:valid_response_length]  # Remove right padding
+            
+            # Add GRM judgment prompt at the end
+            ground_truth = data.non_tensor_batch["reward_model"][i]["ground_truth"]
+            grm_content = f"""The above is a Q&A dialogue. Given that the ground truth is {ground_truth}, please determine whether the assistant's answer is correct. Think carefully and summarize your judgment in the following format:\nJudgment: Correct / Incorrect"""
+            
+            # Format as user message manually to avoid unwanted system messages
+            grm_prompt = f"<|im_start|>user\n{grm_content}<|im_end|>\n<|im_start|>assistant\n"
+            grm_tokens = self.tokenizer.encode(grm_prompt, add_special_tokens=False)
+            grm_tensor = torch.tensor(grm_tokens, dtype=prompts.dtype, device=prompts.device)
+            
+            # Concatenate prompt + valid response + grm prompt
+            concatenated = torch.cat([prompts[i], valid_responses, grm_tensor], dim=0)
+            concatenated_attention = torch.cat([
+                prompt_attention_mask[i], 
+                response_attention_mask[i][:valid_response_length],
+                torch.ones(len(grm_tokens), dtype=response_attention_mask.dtype, device=response_attention_mask.device)
+            ], dim=0)
+            
+            rm_input_ids_list.append(concatenated)
+            rm_attention_mask_list.append(concatenated_attention)
+        
+        # Pad all sequences to the same length (left padding for input_ids, corresponding padding for attention_mask)
+        max_len = full_attention_mask.shape[1]  # 2048+20480 = 22528
+        pad_token_id = self.tokenizer.pad_token_id
+        
+        rm_input_ids = []
+        rm_attention_mask = []
+        
+        for i in range(batch_size):
+            seq_len = rm_input_ids_list[i].shape[0]
+            
+            if seq_len > max_len:
+                # If sequence is too long, truncate from the left (keep the end part with GRM)
+                if self.rank == 0:
+                    print(f"Warning: sequence {i} length {seq_len} > max_len {max_len}, truncating from left")
+                rm_input_ids_list[i] = rm_input_ids_list[i][-max_len:]
+                rm_attention_mask_list[i] = rm_attention_mask_list[i][-max_len:]
+                seq_len = max_len
+                
+            pad_len = max_len - seq_len
+            
+            # Left padding for input_ids
+            padded_input_ids = torch.cat([
+                torch.full((pad_len,), pad_token_id, dtype=rm_input_ids_list[i].dtype, device=rm_input_ids_list[i].device),
+                rm_input_ids_list[i]
+            ], dim=0)
+            
+            # Corresponding padding for attention_mask (0 for padding positions)
+            padded_attention_mask = torch.cat([
+                torch.zeros(pad_len, dtype=rm_attention_mask_list[i].dtype, device=rm_attention_mask_list[i].device),
+                rm_attention_mask_list[i]
+            ], dim=0)
+            
+            rm_input_ids.append(padded_input_ids)
+            rm_attention_mask.append(padded_attention_mask)
+        
+        rm_input_ids = torch.stack(rm_input_ids)  # [batch_size, max_len]
+        rm_attention_mask = torch.stack(rm_attention_mask)  # [batch_size, max_len]
+        
+        # Compute position ids
+        rm_position_ids = compute_position_id_with_mask(rm_attention_mask)
+        
+        rm_inputs = {
+            "input_ids": rm_input_ids, 
+            "attention_mask": rm_attention_mask, 
+            "position_ids": rm_position_ids
+        }
+
+        return DataProto.from_dict(rm_inputs)
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def generate_sequences_as_grm(self, data: DataProto, **kwargs):
+        """
+        This function is used to generate sequences as a generative reward model.
+        """
+        # Support all hardwares
+
+        data = data.to(torch.cuda.current_device())
+        prompts = self._switch_to_grm_template(data)
+
+        assert self._is_rollout
+
+        meta_info = {
+            "eos_token_id": self.generation_config.eos_token_id if self.generation_config is not None else self.tokenizer.eos_token_id,
+            "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,
+        }
+        prompts.meta_info.update(meta_info)
+        with self.rollout_sharding_manager:
+            log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
+
+            prompts = self.rollout_sharding_manager.preprocess_data(prompts)
+
+            if self.config.rollout.name == "sglang_async":
+                from verl.workers.rollout.sglang_rollout import AsyncSGLangRollout
+
+                if isinstance(self.rollout, AsyncSGLangRollout) and hasattr(self.rollout, "_tool_schemas") and len(self.rollout._tool_schemas) > 0:
+                    output = self.rollout.generate_sequences_with_tools(prompts=prompts)
+                else:
+                    output = self.rollout.generate_sequences(prompts=prompts)
+            else:
+                output = self.rollout.generate_sequences(prompts=prompts, is_grm=True)
+
+            log_gpu_memory_usage("After rollout generation", logger=logger)
+
+            output = self.rollout_sharding_manager.postprocess_data(output)
+
         output = output.to("cpu")
 
         # clear kv cache

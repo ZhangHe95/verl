@@ -284,6 +284,7 @@ class RayPPOTrainer:
         val_dataset: Optional[Dataset] = None,
         collate_fn=None,
         train_sampler: Optional[Sampler] = None,
+        use_grm: bool = False,
     ):
         # assert torch.cuda.is_available(), 'cuda must be available on driver'
 
@@ -303,6 +304,7 @@ class RayPPOTrainer:
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
+        self.use_grm = use_grm
         self.ray_worker_group_cls = ray_worker_group_cls
         self.validation_generations_logger = ValidationGenerationsLogger()
 
@@ -731,6 +733,9 @@ class RayPPOTrainer:
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
             self.rm_wg.init_model()
+        
+        if self.use_grm:
+            self.grm_wg = all_wg["actor_rollout"]
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg["actor_rollout"]

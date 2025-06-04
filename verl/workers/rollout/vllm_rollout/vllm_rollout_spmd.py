@@ -85,6 +85,13 @@ class vLLMRollout(BaseRollout):
         """
         super().__init__()
         self.config = config
+        
+        # Initialize rank attribute
+        if torch.distributed.is_initialized():
+            self.rank = torch.distributed.get_rank()
+        else:
+            self.rank = 0
+            
         assert not (not config.enforce_eager and config.free_cache_engine), "disable CUDA graph (enforce_eager = False) if free cache engine"
 
         tensor_parallel_size = self.config.get("tensor_model_parallel_size", 1)
@@ -169,6 +176,8 @@ class vLLMRollout(BaseRollout):
 
         self.pad_token_id = tokenizer.pad_token_id
 
+        self.tokenizer = tokenizer
+
     @contextmanager
     def update_sampling_params(self, **kwargs):
         # update sampling params
@@ -187,7 +196,7 @@ class vLLMRollout(BaseRollout):
 
     @GPUMemoryLogger(role="vllm rollout spmd", logger=logger)
     @torch.no_grad()
-    def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
+    def generate_sequences(self, prompts: DataProto, is_grm: bool = False, **kwargs) -> DataProto:
         # rebuild vllm cache engine
         if (
             vllm_version
@@ -250,9 +259,20 @@ class vLLMRollout(BaseRollout):
                 "temperature": self.config.val_kwargs.temperature,
                 "n": 1,  # if validate, already repeat in ray_trainer
             }
+        elif is_grm:
+            kwargs = {
+                "n": 1,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "top_k": -1,
+                "max_tokens": 2048 # model max tokens = 32k
+            }
+
 
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
+            if self.rank == 0:
+                print(f"self.sampling_params: {self.sampling_params}")
             outputs = self.inference_engine.generate(
                 prompts=vllm_inputs,  # because we have already convert it to prompt token id
                 sampling_params=self.sampling_params,
