@@ -2,6 +2,8 @@ working_dir: ./
 excludes: ["/.git/"]
 env_vars:
   TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
-  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:False"
+  # PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:False"
+  PYTORCH_CUDA_ALLOC_CONF: ""
   # If you are using vllm<=0.6.3, you might need to set the following environment variable to avoid bugs:
   # VLLM_ATTENTION_BACKEND: "XFORMERS"
+  # CUDA_LAUNCH_BLOCKING: "1"

@@ -117,8 +117,10 @@ class TaskRunner:
         }
 
         global_pool_id = "global_pool"
+        grm_pool_id = "grm_pool"
         resource_pool_spec = {
-            global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+            global_pool_id: [config.trainer.n_gpus_per_node] * (config.trainer.nnodes // 2),
+            grm_pool_id: [config.trainer.n_gpus_per_node] * (config.trainer.nnodes // 2),
         }
         mapping = {
             Role.ActorRollout: global_pool_id,
@@ -132,20 +134,19 @@ class TaskRunner:
         # - for code related prompt, we send to a sandbox if there are test cases
         # - finally, we combine all the rewards together
         # - The reward type depends on the tag of the data
-        if config.reward_model.enable:
-            if not config.reward_model.is_generative:
+        if config.reward_model.enable or config.reward_model.grm.enable:
+            if not config.reward_model.grm.enable:
                 if config.reward_model.strategy == "fsdp":
                     from verl.workers.fsdp_workers import RewardModelWorker
-                elif config.reward_model.strategy == "megatron":
+                elif config.reward_model.grm.strategy == "megatron":
                     from verl.workers.megatron_workers import RewardModelWorker
                 else:
                     raise NotImplementedError
                 role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
-            # else:
-            #     role_worker_mapping[Role.RewardModel] = ray.remote(ActorRolloutRefWorker)
-
-            mapping[Role.RewardModel] = global_pool_id
-            
+                mapping[Role.RewardModel] = global_pool_id
+            else:
+                role_worker_mapping[Role.GenerativeRewardModel] = ray.remote(ActorRolloutRefWorker)
+                mapping[Role.GenerativeRewardModel] = grm_pool_id #grm_pool_id
 
         # reference model
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
@@ -166,7 +167,7 @@ class TaskRunner:
 
             reward_manager_cls = DAPORewardManager
         elif reward_manager_name == "llm_judge":
-            from recipe.dapo_llmjudge.llm_judge_reward import LLMJudgeReward
+            from recipe.dapo.llm_judge_reward import LLMJudgeReward
 
             reward_manager_cls = LLMJudgeReward
         else:
@@ -202,7 +203,7 @@ class TaskRunner:
             ray_worker_group_cls=ray_worker_group_cls,
             reward_fn=reward_fn,
             val_reward_fn=val_reward_fn,
-            use_grm=True,
+            use_grm=config.reward_model.grm.enable,
         )
         trainer.init_workers()
         trainer.fit()

@@ -464,3 +464,25 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                 progress_bar.update(1)
                 self.global_steps += 1
+
+    def _maybe_log_val_generations(self, inputs, outputs, scores):
+        """Log a table of validation samples to the configured logger (wandb or swanlab)"""
+        generations_to_log = self.config.trainer.log_val_generations
+        if generations_to_log == 0:
+            return
+        import random
+        
+        res_ids = list(range(len(inputs)))
+        sample_ids = random.sample(res_ids, min(len(res_ids), generations_to_log))
+        # Create samples as dict[dict] format
+        samples = {}
+        for i, idx in enumerate(sample_ids):
+            sample_key = f"sample_{i+1}"
+            sample_data = {
+                "input": inputs[idx],
+                "output": outputs[idx],
+                "score": f"{scores[idx]:.2f}" if isinstance(scores[idx], (int, float)) else str(scores[idx])
+            }
+            samples[sample_key] = sample_data
+        # Log to each configured logger
+        self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)

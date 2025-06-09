@@ -107,10 +107,10 @@ class ActorRolloutRefWorker(Worker):
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
         self.role = role
-        assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
+        assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref", "grm"]
 
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
-        self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
+        self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref", "grm"]
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
 
         self._is_offload_param = False
@@ -165,7 +165,7 @@ class ActorRolloutRefWorker(Worker):
         from verl.utils.model import get_generation_config, print_model_size, update_model_config
         from verl.utils.torch_dtypes import PrecisionType
 
-        assert role in ["actor", "ref"]
+        assert role in ["actor", "ref", "grm"]
 
         log_gpu_memory_usage(f"Before init {role} from HF AutoModel", logger=logger)
         local_path = copy_to_local(model_path)
@@ -381,6 +381,8 @@ class ActorRolloutRefWorker(Worker):
                     model_hf_config=self.actor_model_config,
                     device_mesh=rollout_device_mesh,
                     trust_remote_code=trust_remote_code,
+                    role=self.role,
+                    idx=0 if self.role == "actor" else 1,
                 )
             else:
                 raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")

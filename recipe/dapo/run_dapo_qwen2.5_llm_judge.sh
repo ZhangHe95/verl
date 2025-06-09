@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-project_name='DAPO'
+project_name='DAPO-Tool'
 date_str=$(date +%Y%m%d%H%M%S)
-model_name="Qwen2.5-7B-Instruct"
+model_name="Qwen2.5-7B"
 exp_name="DAPO-${model_name}-LLM-Judge-${date_str}"
 
 adv_estimator=grpo
@@ -17,32 +17,38 @@ clip_ratio_low=0.2
 clip_ratio_high=0.28
 
 max_prompt_length=$((1024 * 2))
-max_response_length=$((1024 * 20))
+max_response_length=$((1024 * 8))
 enable_overlong_buffer=True
 overlong_buffer_len=$((1024 * 4))
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
 
-enable_filter_groups=True
+enable_filter_groups=False
 filter_groups_metric=acc
 max_num_gen_batches=10
-train_prompt_bsz=128
+train_prompt_bsz=32
 gen_prompt_bsz=$((train_prompt_bsz * 2))
-n_resp_per_prompt=16
-train_prompt_mini_bsz=16
+n_resp_per_prompt=8
+train_prompt_mini_bsz=8
 
 # Ray
 PWD=.
-RAY_ADDRESS=${RAY_ADDRESS:-"http://[2605:340:cdb1:130:411a:deb3:f822:7ca1]:9605"}
+RAY_ADDRESS=${RAY_ADDRESS:-"http://[2605:340:cdb1:11c:34da:cbd5:e014:1e1d]:10632"}
+# RAY_ADDRESS=${RAY_ADDRESS:-"http://[2605:340:cdb1:11c:34da:cbd5:e014:1dc8]:9887"}
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
 NNODES=${NNODES:-16}
 # Paths
 MODEL_PATH=${MODEL_PATH:-"/mnt/bn/bandai-lf/shared/models/${model_name}"}
-CKPTS_DIR=${CKPTS_DIR:-"/mnt/hdfs/byte_ad_bandai/user/zhanghe.ads/models/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"/mnt/hdfs/byte_ad_bandai/user/zhanghe.ads/dataset/dapo-math-17k.parquet"}
-TEST_FILE=${TEST_FILE:-"/mnt/hdfs/byte_ad_bandai/user/zhanghe.ads/dataset/aime-2024.parquet"}
+CKPTS_DIR=${CKPTS_DIR:-"/mnt/bn/bandai-lf/users/zhanghe.ads/models/${project_name}/${exp_name}"}
+TRAIN_FILE=${TRAIN_FILE:-"/mnt/bn/bandai-lf/users/lirui/dataset/data/dapo-math-17k.parquet"}
+TEST_FILE=${TEST_FILE:-"/mnt/bn/bandai-lf/users/lirui/dataset/data/aime-2024.parquet"}
+
+# GRM
+enable_grm=True
+grm_name="Qwen2.5-7B-Instruct"
+GRM_PATH=${GRM_PATH:-"/mnt/bn/bandai-lf/shared/models/${grm_name}"}
 
 # Algorithm
 temperature=1.0
@@ -55,13 +61,13 @@ sp_size=4
 use_dynamic_bsz=True
 actor_ppo_max_token_len=$((max_prompt_length + max_response_length))
 infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
-offload=False
+offload=True
 gen_tp=4
 
 ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     --working-dir "${WORKING_DIR}" \
     --address="${RAY_ADDRESS}" \
-    -- python3 -m recipe.dapo_llmjudge.main_dapo \
+    -- python3 -m recipe.dapo.main_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
@@ -120,6 +126,8 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     reward_model.overlong_buffer.enable=${enable_overlong_buffer} \
     reward_model.overlong_buffer.len=${overlong_buffer_len} \
     reward_model.overlong_buffer.penalty_factor=${overlong_penalty_factor} \
+    +reward_model.grm.enable=${enable_grm} \
+    +reward_model.grm.model.path="${GRM_PATH}" \
     trainer.logger=['console','wandb'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \

@@ -73,7 +73,7 @@ def _repeat_interleave(value: Union[torch.Tensor, np.ndarray], repeats: int) -> 
 
 
 class vLLMRollout(BaseRollout):
-    def __init__(self, model_path: str, config: DictConfig, tokenizer, model_hf_config, **kwargs):
+    def __init__(self, model_path: str, config: DictConfig, tokenizer, model_hf_config, role: str, idx: int, **kwargs):
         """A vLLM rollout. It requires the module is supported by the vllm.
 
         Args:
@@ -85,12 +85,22 @@ class vLLMRollout(BaseRollout):
         """
         super().__init__()
         self.config = config
+        self.role = role
+        self.idx = idx
         
+        # Sleep mode can only be used for one instance per process
+        # Priority: main rollout > grm rollout > other instances
+        enable_sleep_mode = False
+        if 'actor' in role:
+            enable_sleep_mode = True
+        else:
+            enable_sleep_mode = False
         # Initialize rank attribute
         if torch.distributed.is_initialized():
             self.rank = torch.distributed.get_rank()
         else:
             self.rank = 0
+
             
         assert not (not config.enforce_eager and config.free_cache_engine), "disable CUDA graph (enforce_eager = False) if free cache engine"
 
@@ -133,7 +143,7 @@ class vLLMRollout(BaseRollout):
 
         self.inference_engine = LLM(
             model=model_path,
-            enable_sleep_mode=True,
+            enable_sleep_mode=enable_sleep_mode,
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="external_launcher",
             dtype=config.dtype,
@@ -154,7 +164,8 @@ class vLLMRollout(BaseRollout):
         )
 
         # Offload vllm model to reduce peak memory usage
-        self.inference_engine.sleep(level=1)
+        if enable_sleep_mode:
+            self.inference_engine.sleep(level=1)
 
         kwargs = dict(
             n=1,
@@ -316,6 +327,13 @@ class vLLMRollout(BaseRollout):
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
         response_attention_mask = get_response_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
         attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+
+        if self.rank == 0:
+            print(f"attention_mask: {attention_mask.shape}")
+            # print(f"loss_mask: {loss_mask.shape}")
+            print(f"position_ids: {position_ids.shape}")
+            print(f"response: {response.shape}")
+            print(f"seq: {seq.shape}")
 
         # all the tp ranks should contain the same data here. data in all ranks are valid
         batch = TensorDict(
